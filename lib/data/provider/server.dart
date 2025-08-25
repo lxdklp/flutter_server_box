@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 // import 'dart:io';
 
 import 'package:computer/computer.dart';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:fl_lib/fl_lib.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_gbk2utf8/flutter_gbk2utf8.dart';
 import 'package:server_box/core/extension/ssh_client.dart';
 import 'package:server_box/core/sync.dart';
@@ -298,7 +300,7 @@ class ServerProvider extends Provider {
     s.notify();
   }
 
-  static Future<void> _getData(Spi spi) async {
+  static Future<void> _getData(Spi spi, {int retry = 0}) async {
     final sid = spi.id;
     final s = servers[sid];
 
@@ -384,19 +386,24 @@ class ServerProvider extends Provider {
         sv.status.system = detectedSystemType;
 
         final (_, writeScriptResult) = await sv.client!.exec((session) async {
-          final scriptRaw = ShellFuncManager.allScript(
+          final scriptString = ShellFuncManager.allScript(
             spi.custom?.cmds,
             systemType: detectedSystemType,
             disabledCmdTypes: spi.disabledCmdTypes,
-          ).uint8List;
-          session.stdin.add(scriptRaw);
-          session.stdin.close();
-        }, entry: ShellFuncManager.getInstallShellCmd(spi.id, systemType: detectedSystemType));
-        if (writeScriptResult.isNotEmpty && detectedSystemType != SystemType.windows) {
-          ShellFuncManager.switchScriptDir(spi.id, systemType: detectedSystemType);
+          ).toString();
+        final scriptRaw = Uint8List.fromList(gbk.encode(scriptString));
+        session.stdin.add(scriptRaw);
+        session.stdin.close();
+      }, entry: ShellFuncManager.getInstallShellCmd(spi.id, systemType: detectedSystemType));
+      if (writeScriptResult.isNotEmpty && detectedSystemType != SystemType.windows) {
+        ShellFuncManager.switchScriptDir(spi.id, systemType: detectedSystemType);
           throw writeScriptResult;
         }
       } on SSHAuthAbortError catch (e) {
+        if (retry < 3) {
+          await Future.delayed(Duration(seconds: 1));
+          return _getData(spi, retry: retry + 1);
+        }
         TryLimiter.inc(sid);
         final err = SSHErr(type: SSHErrType.auth, message: e.toString());
         sv.status.err = err;
@@ -462,6 +469,7 @@ class ServerProvider extends Provider {
           }if (needGbk) {
             try {
               rawStr = gbk.decode(execResult);
+              debugPrint('GBK decoded string: $rawStr');
             } catch (e2) {
               Loggers.app.warning('GBK decoding failed', e2);
               rawStr = null;
